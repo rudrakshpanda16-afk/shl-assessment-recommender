@@ -15,7 +15,7 @@ st.set_page_config(
 # -------------------------------------------------
 # UI
 # -------------------------------------------------
-st.title("📊 SHL Assessment Recommendation System")
+st.title("SHL Assessment Recommendation System")
 
 st.write(
     """
