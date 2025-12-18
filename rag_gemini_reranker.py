@@ -18,7 +18,7 @@ load_dotenv()
 
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
-    raise ValueError("API Key not found in .env file")
+    raise ValueError("API Key not found in environment")
 
 client = genai.Client(api_key=api_key)
 
@@ -44,9 +44,11 @@ class GeminiAssessmentRecommender:
         self.df = pd.DataFrame(self.data)
 
         # 2. Heuristic preprocessing
-        self.df["duration_mins"] = self.df["assessment_length"].apply(self._extract_minutes)
+        self.df["duration_mins"] = self.df["assessment_length"].apply(
+            self._extract_minutes
+        )
 
-        # 3. Semantic chunks
+        # 3. Semantic chunks (UNCHANGED)
         self.df["semantic_chunk"] = self.df.apply(
             lambda x: (
                 f"URL: {x['url']}\n"
@@ -59,26 +61,26 @@ class GeminiAssessmentRecommender:
             axis=1
         )
 
-        # 4. Load or create embeddings
-        if os.path.exists(self.embedding_file):
-            with open(self.embedding_file, "rb") as f:
-                self.embeddings = pickle.load(f)
-            if len(self.embeddings) != len(self.df):
-                self._generate_and_save_embeddings()
-        else:
-            self._generate_and_save_embeddings()
+        # -------------------------------------------------
+        # 4. FORCE FRESH EMBEDDINGS (prevents zero-vector bugs)
+        # -------------------------------------------------
+        print("⚠️ Generating fresh embeddings...")
+        self.embeddings = self._generate_document_embeddings(
+            self.df["semantic_chunk"].tolist()
+        )
+
+        # 🔑 NORMALIZATION (CRITICAL)
+        self.embeddings = self._normalize(self.embeddings)
+
+        with open(self.embedding_file, "wb") as f:
+            pickle.dump(self.embeddings, f)
+
+        print("✅ Embeddings generated and normalized")
 
     # -------------------------------------------------
     # EMBEDDINGS
     # -------------------------------------------------
-    def _generate_and_save_embeddings(self):
-        self.embeddings = self._generate_document_embeddings(
-            self.df["semantic_chunk"].tolist()
-        )
-        with open(self.embedding_file, "wb") as f:
-            pickle.dump(self.embeddings, f)
-
-    def _generate_document_embeddings(self, texts, batch_size=100):
+    def _generate_document_embeddings(self, texts, batch_size=50):
         all_embeddings = []
 
         for i in range(0, len(texts), batch_size):
@@ -94,11 +96,13 @@ class GeminiAssessmentRecommender:
                 )
                 all_embeddings.extend([e.values for e in result.embeddings])
                 time.sleep(0.5)
-            except Exception as e:
-                print(f"Embedding error: {e}")
-                all_embeddings.extend([[0.0] * 768] * len(batch))
 
-        return np.array(all_embeddings)
+            except Exception as e:
+                print(f"❌ Embedding error: {e}")
+                # DO NOT silently poison similarity
+                all_embeddings.extend([[1e-6] * 768] * len(batch))
+
+        return np.array(all_embeddings, dtype=np.float32)
 
     # -------------------------------------------------
     # UTIL
@@ -109,19 +113,29 @@ class GeminiAssessmentRecommender:
         match = re.search(r"minutes\s*=\s*(\d+)", text, re.IGNORECASE)
         return int(match.group(1)) if match else 999
 
+    def _normalize(self, vectors):
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        return vectors / norms
+
     # -------------------------------------------------
-    # RETRIEVAL
+    # RETRIEVAL (FIXED)
     # -------------------------------------------------
     def retrieve_candidates(self, query, top_k=30):
         query_response = client.models.embed_content(
             model=self.embedding_model,
             contents=query,
             config=types.EmbedContentConfig(
-                task_type="QUESTION_ANSWERING"
+                # 🔑 MUST MATCH DOCUMENT TASK
+                task_type="RETRIEVAL_QUERY"
             ),
         )
 
-        query_embedding = np.array(query_response.embeddings[0].values)
+        query_embedding = np.array(
+            query_response.embeddings[0].values, dtype=np.float32
+        )
+        query_embedding = query_embedding / np.linalg.norm(query_embedding)
+
         scores = np.dot(self.embeddings, query_embedding)
         top_indices = np.argsort(scores)[::-1][:top_k]
 
@@ -138,7 +152,7 @@ class GeminiAssessmentRecommender:
         return candidates
 
     # -------------------------------------------------
-    # PHASE 1: GROUNDED RERANKING (SEARCH + THINKING)
+    # PHASE 1: GROUNDED RERANKING (UNCHANGED)
     # -------------------------------------------------
     def rerank_grounded(self, query, candidates):
         system_instruction = """
@@ -182,7 +196,7 @@ Rank the best assessments and explain briefly.
         return response.text
 
     # -------------------------------------------------
-    # PHASE 2: STRICT JSON EXTRACTION
+    # PHASE 2: STRICT JSON EXTRACTION (UNCHANGED)
     # -------------------------------------------------
     def extract_json(self, text):
         extraction_prompt = f"""
@@ -213,7 +227,7 @@ TEXT:
         return json.loads(response.text)
 
     # -------------------------------------------------
-    # PIPELINE
+    # PIPELINE (UNCHANGED)
     # -------------------------------------------------
     def recommend(self, query):
         candidates = self.retrieve_candidates(query)
@@ -223,9 +237,9 @@ TEXT:
         final = []
         for r in rankings:
             match = next((c for c in candidates if c["id"] == r["id"]), None)
-
             if not match:
                 continue
+
             final.append({
                 "rank": r["rank"],
                 "url": match["url"],
