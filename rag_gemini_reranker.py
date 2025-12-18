@@ -8,7 +8,7 @@ import pickle
 from dotenv import load_dotenv
 
 # NEW SDK IMPORTS
-from google import genai
+import google.genai as genai
 from google.genai import types
 
 # -------------------------------------------------
